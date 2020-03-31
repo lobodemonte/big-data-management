@@ -12,6 +12,7 @@ def toCSVLine(entry):
         product = '"' + entry[0][0] + '"'
     return product + "," + str(entry[0][1]) + "," + str(entry[1][0]) + "," + str(entry[1][1]) + "," + str(entry[1][2])
 
+
 def extract_complaints(partId, list_of_records):
     if partId==0: 
         next(list_of_records) # skipping the header line
@@ -24,7 +25,7 @@ def extract_complaints(partId, list_of_records):
             company = row[7].lower()            
             yield ((product, year_received, company), 1)
         except:
-            print("Exception Occurred", row)
+            print("Exception Occurred: ", row)
 
 def run_spark(complaints_file_path, output_path):
     sc = SparkContext()
