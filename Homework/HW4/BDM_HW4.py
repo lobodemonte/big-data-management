@@ -1,4 +1,3 @@
-import fiona
 import geopandas as gpd
 import pandas as pd
 import numpy as np
@@ -8,6 +7,8 @@ from pathlib import Path
 from pyspark import SparkContext
 from geopandas import GeoDataFrame
 
+boros_file = 'boroughs.geojson'
+neighborhood_file = 'neighborhoods.geojson'
 
 def createIndex(shapefile):
     import rtree
@@ -40,8 +41,8 @@ def processTrips(pid, records):
     
     # Create an R-tree index
     proj = pyproj.Proj(init="epsg:2263", preserve_units=True)    
-    boros = createIndex('boroughs.geojson')    
-    neighborhoods = createIndex('neighborhoods.geojson')    
+    boros = createIndex(boros_file)    
+    neighborhoods = createIndex(neighborhood_file)    
     
     for row in reader:
         # 'tpep_pickup_datetime,tpep_dropoff_datetime,pickup_latitude,pickup_longitude,dropoff_latitude,dropoff_longitude',
@@ -62,13 +63,10 @@ def processTrips(pid, records):
         except: 
             print("Failed at: ", row) ##TODO this won't log anything
 
-def run_spark(taxi_file):
-    sc = SparkContext()
-
+def run_spark(taxi_file, sc):
     from heapq import nlargest
     from operator import itemgetter
 
-    start = time.time()
     rdd = sc.textFile(taxi_file).mapPartitionsWithIndex(processTrips).cache()
     
     counts = rdd.reduceByKey(lambda x,y: x+y) \
@@ -78,14 +76,17 @@ def run_spark(taxi_file):
                 .map(lambda x: x[0]+ "," + ",".join([str(i) for sub in x[1] for i in sub])) \
                 .collect()
     
-    return counts.sort()
-    print("Execution Time(secs): ", time.time() - start)
-
+    counts.sort()
+    return counts
 
 if __name__ == '__main__':
+    sc = SparkContext()
     parser = argparse.ArgumentParser()
     parser.add_argument("input_file", type=Path)
-
     p = parser.parse_args()
-    results = run_spark(str(p.input_file))
-    results
+
+    print("Input File: ", str(p.input_file))
+    results = run_spark(str(p.input_file), sc)
+    
+    print("Results")
+    print(results)
