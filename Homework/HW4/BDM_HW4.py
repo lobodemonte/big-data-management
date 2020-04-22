@@ -2,13 +2,27 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import rtree
-import argparse
-from pathlib import Path
 from pyspark import SparkContext
-from geopandas import GeoDataFrame
 
 boros_file = 'boroughs.geojson'
 neighborhood_file = 'neighborhoods.geojson'
+
+def genIndex(shapefile):
+    import rtree
+    import fiona.crs
+    import geopandas as gpd
+    zones = gpd.read_file(shapefile).to_crs(fiona.crs.from_epsg(2263))
+    index = rtree.Rtree()
+    for idx, geometry in enumerate(zones.geometry):
+        yield (idx, geometry.bounds, zones.iloc[idx])
+
+def getZone(p, index, field):
+    matches = index.intersection((p.x, p.y, p.x, p.y), objects=True)
+    for match in matches:
+        hood = match.object
+        if hood.geometry.contains(p):
+            return hood[field]
+    return None
 
 def createIndex(shapefile):
     import rtree
@@ -37,29 +51,43 @@ def processTrips(pid, records):
         next(records)
     
     reader = csv.reader(records)
-    counts = {}
     
     # Create an R-tree index
     proj = pyproj.Proj(init="epsg:2263", preserve_units=True)    
-    boros = createIndex(boros_file)    
-    neighborhoods = createIndex(neighborhood_file)    
     
+    # boros = createIndex(boros_file)    
+    # neighborhoods = createIndex(neighborhood_file)    
+    
+    boros_index = rtree.index.Index(genIndex('boroughs.geojson'))
+    hood_index = rtree.index.Index(genIndex('neighborhoods.geojson'))
+
     for row in reader:
         # 'tpep_pickup_datetime,tpep_dropoff_datetime,pickup_latitude,pickup_longitude,dropoff_latitude,dropoff_longitude',
         try: 
             if 'NULL' in row[2:5]: 
                 continue
+            # if 'NULL' in row[5:6] or 'NULL' in row[9:10]:
+            #     continue
+
             pickup_point = geom.Point(proj(float(row[3]), float(row[2])))
-            start_boro = findZone(pickup_point, boros)
+            # pickup_point = geom.Point(proj(float(row[5]), float(row[6])))            
+
+#             start_boro = findZone(pickup_point, boros)
+            start_boro = getZone(pickup_point, boros_index, 'boroname')
             
             if start_boro:
-                boro_name = boros['zones'].iloc[start_boro]['boroname']
-
                 dropoff_point= geom.Point(proj(float(row[5]), float(row[4])))
-                end_hood = findZone(dropoff_point, neighborhoods)
+                # dropoff_point= geom.Point(proj(float(row[9]), float(row[10])))
+                
+                # end_hood = findZone(dropoff_point, neighborhoods)
+                end_hood = getZone(dropoff_point, hood_index, 'neighborhood')
+                
                 if end_hood:
-                    hood_name = neighborhoods['zones'].iloc[end_hood]['neighborhood']
-                    yield ( (boro_name, hood_name), 1 )
+                    # boro_name = boros['zones'].iloc[start_boro]['boroname']
+                    # hood_name = neighborhoods['zones'].iloc[end_hood]['neighborhood']
+                    # yield ( (boro_name, hood_name), 1 )
+                    yield ( (start_boro, end_hood), 1 )
+
         except: 
             print("Failed at: ", row) ##TODO this won't log anything
 
@@ -80,6 +108,8 @@ def run_spark(taxi_file, sc):
     return counts
 
 if __name__ == '__main__':
+    import argparse
+    from pathlib import Path
     sc = SparkContext()
     parser = argparse.ArgumentParser()
     parser.add_argument("input_file", type=Path)
@@ -90,3 +120,7 @@ if __name__ == '__main__':
     
     print("Results")
     print(results)
+
+    import index from rtree
+    idx = index.Index()
+
