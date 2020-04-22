@@ -55,14 +55,12 @@ def processTrips(pid, records):
     # Create an R-tree index
     proj = pyproj.Proj(init="epsg:2263", preserve_units=True)    
     
-    # boros = createIndex(boros_file)    
-    # neighborhoods = createIndex(neighborhood_file)    
-    
+    #boros = createIndex(boros_file)    
+    #neighborhoods = createIndex(neighborhood_file)    
     boros_index = rtree.index.Index(genIndex('boroughs.geojson'))
     hood_index = rtree.index.Index(genIndex('neighborhoods.geojson'))
 
     for row in reader:
-        # 'tpep_pickup_datetime,tpep_dropoff_datetime,pickup_latitude,pickup_longitude,dropoff_latitude,dropoff_longitude',
         try: 
             if 'NULL' in row[2:5]: 
                 continue
@@ -89,38 +87,36 @@ def processTrips(pid, records):
                     yield ( (start_boro, end_hood), 1 )
 
         except: 
-            print("Failed at: ", row) ##TODO this won't log anything
+            print("Failed at: ", row) ## TODO this won't log anything
 
-def run_spark(taxi_file, sc):
+def run_spark(taxi_file, output_path, sc):
     from heapq import nlargest
     from operator import itemgetter
 
-    rdd = sc.textFile(taxi_file).mapPartitionsWithIndex(processTrips).cache()
+    rdd = sc.textFile(taxi_file).mapPartitionsWithIndex(processTrips)
     
     counts = rdd.reduceByKey(lambda x,y: x+y) \
                 .map(lambda x: ( x[0][0], [(x[0][1], x[1])] ) ) \
                 .reduceByKey(lambda x,y: x+y) \
                 .mapValues(lambda hood_counts: nlargest(3, hood_counts, key=itemgetter(1))) \
-                .map(lambda x: x[0]+ "," + ",".join([str(i) for sub in x[1] for i in sub])) \
-                .collect()
-    
-    counts.sort()
-    return counts
+                .map(lambda x: str(x[0])+ "," + ",".join([str(i) for sub in x[1] for i in sub])) \
+                .sortByKey()
+
+    counts.saveAsTextFile(output_path)
 
 if __name__ == '__main__':
     import argparse
     from pathlib import Path
     sc = SparkContext()
     parser = argparse.ArgumentParser()
+    
     parser.add_argument("input_file", type=Path)
+    parser.add_argument("output_path", type=Path)
     p = parser.parse_args()
 
     print("Input File: ", str(p.input_file))
-    results = run_spark(str(p.input_file), sc)
-    
-    print("Results")
-    print(results)
+    print("Output Path: ", str(p.output_path))
+    run_spark(str(p.input_file), str(p.output_path), sc)
+    print("Done")
 
-    import index from rtree
-    idx = index.Index()
 
