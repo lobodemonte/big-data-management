@@ -41,8 +41,8 @@ def processTrips(pid, records):
     counts = {}
     for row in reader:
         try: 
-            # if 'NULL' in row[2:6]: 
-            #     continue
+            #if 'NULL' in row[2:6]: 
+            #    continue
             if 'NULL' in row[5:7] or 'NULL' in row[9:11]:
                 continue
 
@@ -66,7 +66,7 @@ def processTrips(pid, records):
     return counts.items()
 
 def run_spark(taxi_file, output_path):
-    
+    sc = SparkContext()
     rdd = sc.textFile(taxi_file)
 
     counts_rdd = rdd.mapPartitionsWithIndex(processTrips) \
@@ -75,7 +75,7 @@ def run_spark(taxi_file, output_path):
                 .reduceByKey(lambda x, y: x + y ) \
                 .mapValues(lambda hood_counts: sorted(hood_counts, reverse=True, key=lambda tup:tup[1])[:3]) \
                 .sortByKey() \
-                .map(lambda x: x[0] + "," + ",".join([str(i) for sub in x[1] for i in sub])) \
+                .map(lambda x: str(x[0]) + "," + ",".join([str(i) for sub in x[1] for i in sub])) \
    
     counts_rdd.saveAsTextFile(output_path)
 
