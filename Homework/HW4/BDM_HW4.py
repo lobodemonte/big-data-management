@@ -66,6 +66,7 @@ def processTrips(pid, records):
     return counts.items()
 
 def run_spark(taxi_file, output_path):
+    
     sc = SparkContext()
     rdd = sc.textFile(taxi_file)
 
@@ -92,5 +93,3 @@ if __name__ == '__main__':
     print("Output Path: ", str(p.output_path))
     run_spark(str(p.input_file), str(p.output_path))
     print("Done")
-
-
