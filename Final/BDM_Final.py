@@ -1,18 +1,20 @@
 import pandas as pd
 import numpy as np
 import traceback
+import time
 
 from datetime import datetime
 
 from pyspark.sql import SparkSession
 from pyspark import SparkContext, SparkConf
 from pyspark.sql.functions import col, udf, array, count
+from pyspark.sql.functions import broadcast,coalesce, lit
 
 streets = "nyc_cscl.csv"
 violations = "nyc_parking_violation/*.csv"
 
-# streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
-# violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
+#streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
+#violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
 
 def to_upper(string):
     if string is None:
@@ -75,14 +77,14 @@ def get_violations_df(violations_file, spark):
     get_year_udf = udf(get_year)
     to_upper_udf = udf(to_upper)
 
-    violations_df = spark.read.csv(violations,header=True, inferSchema=True)
+    violations_df = spark.read.csv(violations_file,header=True, inferSchema=True)
 
     violations_df = violations_df.select("Violation County", "House Number", "Street Name", "Issue Date")
 
     violations_df = violations_df.filter((violations_df['Violation County'].isNotNull()) 
-                                        & (violations_df['House Number'].isNotNull()) 
-                                        & (violations_df['Street Name'].isNotNull()) 
-                                        & (violations_df['Issue Date'].isNotNull())
+                                         & (violations_df['House Number'].isNotNull()) 
+                                         & (violations_df['Street Name'].isNotNull()) 
+                                         & (violations_df['Issue Date'].isNotNull())
                                         )
 
     violations_df = violations_df.withColumn('Violation County', get_county_code_udf(violations_df['Violation County']))
@@ -96,16 +98,19 @@ def get_violations_df(violations_file, spark):
     violations_df = violations_df.withColumnRenamed("Issue Date","YEAR")
 
     violations_df = violations_df.where(violations_df.YEAR.isin(list(range(2015,2020))))
+    violations_df = violations_df.repartition(5,'COUNTY')
     return violations_df
 
 def get_streets_df(streets_file, spark):
     get_street_number_udf = udf(get_street_number)
+    get_county_code_udf = udf(get_county_code)
+    get_year_udf = udf(get_year)
     to_upper_udf = udf(to_upper)
 
-    streets_df = spark.read.csv(streets,header=True, inferSchema=True)
+    streets_df = spark.read.csv(streets_file, header=True, inferSchema=True)
 
     streets_df = streets_df.select("PHYSICALID","BOROCODE", "FULL_STREE", "ST_LABEL","L_LOW_HN", "L_HIGH_HN", 
-                                "R_LOW_HN", "R_HIGH_HN")
+                                   "R_LOW_HN", "R_HIGH_HN")
 
     streets_df = streets_df.withColumn('FULL_STREE', to_upper_udf(streets_df['FULL_STREE']))
     streets_df = streets_df.withColumn('ST_LABEL',   to_upper_udf(streets_df['ST_LABEL']))
@@ -117,14 +122,16 @@ def get_streets_df(streets_file, spark):
     streets_df = streets_df.withColumnRenamed("L_LOW_HN","OddLo")
     streets_df = streets_df.withColumnRenamed("L_HIGH_HN","OddHi")
     streets_df = streets_df.withColumnRenamed("R_LOW_HN","EvenLo")
-    streets_df = streets_df.withColumnRenamed("R_HIGH_HN","EvenHi") 
-    return streets_df   
+    streets_df = streets_df.withColumnRenamed("R_HIGH_HN","EvenHi")
+    
+    streets_df = streets_df.repartition(5, 'BOROCODE')
+    return streets_df  
 
 def merge_dfs(streets_df, violations_df):
     merged_df = (
-        streets_df.join(
-            violations_df,
-            ((col("s.BOROCODE") == col("v.County")) &
+        violations_df.join(
+            broadcast(streets_df),
+            ((col("s.BOROCODE") == col("v.COUNTY")) &
             (
                 (col("s.FULL_STREE") == col("v.STREETNAME")) | 
                 (col("s.ST_LABEL") == col("v.STREETNAME"))
@@ -133,7 +140,7 @@ def merge_dfs(streets_df, violations_df):
                 ((col("v.HOUSENUM") % 2 == 0)  & (col("v.HOUSENUM") >= col("s.EvenLo")) & (col("v.HOUSENUM") <= col("s.EvenHi"))) |  
                 ((col("v.HOUSENUM") % 2 == 1)  & (col("v.HOUSENUM") >= col("s.OddLo"))  & (col("v.HOUSENUM") <= col("s.OddHi")))
             )
-        ), how='left')
+        ), how='inner')
     ).select(col("s.PHYSICALID"),col("v.YEAR"))
 
     merged_df = merged_df.alias('m')
@@ -154,7 +161,7 @@ def run_spark(output_path):
     merged_df = merge_dfs(streets_df, violations_df)
     merged_df.createOrReplaceTempView("merged_results")
 
-    summaries = sqlContext.sql(
+    summaries = spark.sql(
         "select m.PHYSICALID, " +
         "MAX(CASE WHEN (YEAR = 2015) THEN YEAR_COUNT ELSE 0 END) AS COUNT_2015, " +
         "MAX(CASE WHEN (YEAR = 2016) THEN YEAR_COUNT ELSE 0 END) AS COUNT_2016, " +
@@ -168,8 +175,23 @@ def run_spark(output_path):
 
     getOLS_udf = udf(getOLS)
     
-    summaries = summaries.withColumn('OLS_COEF', getOLS_udf(array('COUNT_2015', 'COUNT_2016', 'COUNT_2017', 'COUNT_2018', 'COUNT_2019')))
-    summaries.write.csv(output_path, header=False)
+    summaries = summaries.withColumn('OLS_COEF', 
+                    getOLS_udf(array('COUNT_2015', 'COUNT_2016', 'COUNT_2017', 'COUNT_2018', 'COUNT_2019')))
+    summaries = summaries.alias('f')
+
+    streets_df = streets_df.select(col("s.PHYSICALID")) \
+                        .join(summaries, "PHYSICALID", how='left') \
+                        .distinct() \
+                        .orderBy("PHYSICALID") \
+
+    streets_df = streets_df.withColumn("COUNT_2015",coalesce("COUNT_2015", lit(0))) 
+    streets_df = streets_df.withColumn("COUNT_2016",coalesce("COUNT_2016", lit(0))) 
+    streets_df = streets_df.withColumn("COUNT_2017",coalesce("COUNT_2017", lit(0))) 
+    streets_df = streets_df.withColumn("COUNT_2018",coalesce("COUNT_2018", lit(0))) 
+    streets_df = streets_df.withColumn("COUNT_2019",coalesce("COUNT_2019", lit(0))) 
+    streets_df = streets_df.withColumn("OLS_COEF",  coalesce("OLS_COEF", lit(0.0))) 
+
+    streets_df.write.csv(output_path, header=False)
 
 if __name__ == '__main__':
     import argparse
