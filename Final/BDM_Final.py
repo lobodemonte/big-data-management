@@ -4,10 +4,9 @@ import traceback
 
 from datetime import datetime
 
+from pyspark.sql import SparkSession
 from pyspark import SparkContext, SparkConf
-from pyspark.sql.functions import col, udf, array
-from pyspark.sql import SQLContext
-from pyspark import sql
+from pyspark.sql.functions import col, udf, array, count
 
 streets = "nyc_cscl.csv"
 violations = "nyc_parking_violation/*.csv"
@@ -70,17 +69,13 @@ def getOLS(values):
     coef = fit.params[0]
     return float(coef)
 
-def get_violations_df(violations_file, sqlContext):
+def get_violations_df(violations_file, spark):
     get_street_number_udf = udf(get_street_number)
     get_county_code_udf = udf(get_county_code)
     get_year_udf = udf(get_year)
     to_upper_udf = udf(to_upper)
 
-    violations_df = sqlContext.read.format("csv") \
-    .option("delimiter",",") \
-    .option("header", "true") \
-    .option("inferSchema", "true") \
-    .load(violations_file)
+    violations_df = spark.read.csv(violations,header=True, inferSchema=True)
 
     violations_df = violations_df.select("Violation County", "House Number", "Street Name", "Issue Date")
 
@@ -103,15 +98,11 @@ def get_violations_df(violations_file, sqlContext):
     violations_df = violations_df.where(violations_df.YEAR.isin(list(range(2015,2020))))
     return violations_df
 
-def get_streets_df(streets_file, sqlContext):
+def get_streets_df(streets_file, spark):
     get_street_number_udf = udf(get_street_number)
     to_upper_udf = udf(to_upper)
 
-    streets_df = sqlContext.read.format("csv") \
-    .option("delimiter",",") \
-    .option("header", "true") \
-    .option("inferSchema", "true") \
-    .load(streets_file)
+    streets_df = spark.read.csv(streets,header=True, inferSchema=True)
 
     streets_df = streets_df.select("PHYSICALID","BOROCODE", "FULL_STREE", "ST_LABEL","L_LOW_HN", "L_HIGH_HN", 
                                 "R_LOW_HN", "R_HIGH_HN")
@@ -146,17 +137,16 @@ def merge_dfs(streets_df, violations_df):
     ).select(col("s.PHYSICALID"),col("v.YEAR"))
 
     merged_df = merged_df.alias('m')
-    merged_df = merged_df.groupBy("m.PHYSICALID", "m.YEAR") \
-        .agg(count("*").alias("YEAR_COUNT"))
+    merged_df = merged_df.groupBy("m.PHYSICALID", "m.YEAR").agg(count("*").alias("YEAR_COUNT"))
     return merged_df
 
 
 def run_spark(output_path):
     sc = SparkContext()
-    sqlContext = sql.SQLContext(sc)
+    spark = SparkSession(sc)
 
-    streets_df = get_streets_df(streets, sqlContext)
-    violations_df = get_violations_df(violations, sqlContext)
+    streets_df = get_streets_df(streets, spark)
+    violations_df = get_violations_df(violations, spark)
 
     streets_df = streets_df.alias('s')
     violations_df = violations_df.alias('v')
