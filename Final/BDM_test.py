@@ -13,9 +13,9 @@ from itertools import chain
 from pyspark.sql.functions import col, lit, when, isnull
 
 def to_upper(string):
-    if string is None:
-        return None
-    return string.strip().upper()
+    if string is not None:
+        return string.strip().upper()
+    return None
 
 def get_county_code(county):
     if county is not None:
@@ -30,23 +30,30 @@ def get_county_code(county):
             return 4
         if county == 'R' or county == 'ST':
             return 5
-    return -1
+    return None
 
-def get_year(string): 
-    data_val = datetime.strptime(string.strip(), '%m/%d/%Y')    
-    return data_val.year
+def get_year(date_string):
+    if date_string is not None:
+        data_val = datetime.strptime(date_string.strip(), '%m/%d/%Y')    
+        return data_val.year
+    return None
 
 def get_street_number(street_val):
-    if street_val is None:
-        return 0
-    if type(street_val) is int:
-        return street_val
-    elems = street_val.split("-")
-    new_val = "".join(elems)
-    if new_val.isdigit():
-        return int(new_val)
-    else:
-        return 0
+    if street_val is not None:
+        if type(street_val) is int:
+            return street_val
+        elems = street_val.split("-")  
+        if len(elems) == 1 and elems[0].isdigit():
+            return int(elems[0])
+        elif len(elems) == 2 and elems[0].isdigit() and elems[1].isdigit():
+            new_val = elems[0] + "{:04d}".format(int(elems[1]))
+            if new_val.isdigit():
+                return int(new_val)          
+        else:
+            new_val = "".join(elems)
+            if new_val.isdigit():
+                return int(new_val)
+    return 0
 
 def as_digit(val):
     if val:
@@ -75,17 +82,17 @@ def get_violations_df(violations_file, spark):
     violations_df = violations_df.withColumnRenamed("Street Name","STREETNAME")
     violations_df = violations_df.withColumnRenamed("Issue Date","YEAR")
     
-    violations_df = violations_df.filter((violations_df['COUNTY'].isNotNull()) 
-                                         & (violations_df['HOUSENUM'].isNotNull()) 
-                                         & (violations_df['STREETNAME'].isNotNull()) 
-                                         & (violations_df['YEAR'].isNotNull())
-                                        )
-
     violations_df = violations_df.withColumn('COUNTY', get_county_code_udf(violations_df['COUNTY']))
     violations_df = violations_df.withColumn('HOUSENUM', get_street_number_udf(violations_df['HOUSENUM']))
     violations_df = violations_df.withColumn('STREETNAME', to_upper_udf(violations_df['STREETNAME']))
     violations_df = violations_df.withColumn('YEAR', get_year_udf(violations_df['YEAR']))
 
+    violations_df = violations_df.filter((violations_df['COUNTY'].isNotNull()) 
+                                         & (violations_df['HOUSENUM'].isNotNull()) 
+                                         & (violations_df['STREETNAME'].isNotNull()) 
+                                         & (violations_df['YEAR'].isNotNull())
+                                        )
+    
     violations_df = violations_df.withColumn("COUNTY", violations_df["COUNTY"].cast("integer"))
     violations_df = violations_df.withColumn("HOUSENUM", violations_df["HOUSENUM"].cast("integer"))
     violations_df = violations_df.withColumn("YEAR", violations_df["YEAR"].cast("integer"))
@@ -153,16 +160,17 @@ def run_spark(output_path):
     
     streets = "nyc_cscl.csv"
     violations = "nyc_parking_violation/*.csv"
-    # streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
-    # violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
+    #streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
+    #violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
 
     violations_df = get_violations_df(violations, spark)
     streets_df = get_streets_df(streets, spark)
 
     streets_dict = streets_df.rdd.flatMap(mapper).reduceByKey(lambda x,y: x+y).collectAsMap()
-    
+    streets_dict_bc = sc.broadcast(streets_dict)
+
     def get_val(borocode, street, housenum):
-        val = streets_dict.get( (borocode, street) )
+        val = streets_dict_bc.value.get( (borocode, street) )
         if val:
             for item in val:
                 if housenum % 2 == 0:
@@ -226,5 +234,4 @@ if __name__ == '__main__':
 
     print("Output Path: ", str(p.output_path))
     df = run_spark(str(p.output_path))
-    # print(df.show(10))
     print("Done")
