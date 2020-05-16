@@ -60,7 +60,7 @@ def getOLS(values):
     import statsmodels.api as sm
     X = sm.add_constant(np.arange(len(values)))
     fit = sm.OLS(values, X).fit()
-    coef = fit.params[0]
+    coef = fit.params[1]
     return float(coef)
 
 def get_violations_df(violations_file, spark):
