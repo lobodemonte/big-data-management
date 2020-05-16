@@ -9,7 +9,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf, array, count, broadcast, coalesce, lit
 
 def to_upper(string):
-    if string is not None:
+    if string is not None and string != "":
         return string.strip().upper()
     return None
 
@@ -30,26 +30,29 @@ def get_county_code(county):
 
 def get_year(date_string):
     if date_string is not None:
-        data_val = datetime.strptime(date_string.strip(), '%m/%d/%Y')    
-        return data_val.year
+        data_val = datetime.strptime(date_string.strip(), '%m/%d/%Y')  
+        if data_val.year in list(range(2015,2020)):
+            return data_val.year
     return None
 
-def get_street_number(street_val):
-    if street_val is not None:
-        if type(street_val) is int:
+def get_street_number(street_val_raw, default=None, house=None):
+    if street_val_raw is not None:
+        if type(street_val_raw) is int:
             return street_val
+        
+        street_val = street_val_raw.strip(string.ascii_letters)
         elems = street_val.split("-")  
         if len(elems) == 1 and elems[0].isdigit():
             return int(elems[0])
         elif len(elems) == 2 and elems[0].isdigit() and elems[1].isdigit():
-            new_val = elems[0] + "{:04d}".format(int(elems[1]))
+            new_val = elems[0] + "{:03d}".format(int(elems[1]))
             if new_val.isdigit():
                 return int(new_val)          
         else:
             new_val = "".join(elems)
             if new_val.isdigit():
                 return int(new_val)
-    return 0
+    return default
 
 def as_digit(val):
     if val:
@@ -58,7 +61,7 @@ def as_digit(val):
 
 def getOLS(values):
     import statsmodels.api as sm
-    X = sm.add_constant(np.arange(len(values)))
+    X = sm.add_constant([1,2,3,4,5])
     fit = sm.OLS(values, X).fit()
     coef = fit.params[1]
     return float(coef)
@@ -78,6 +81,8 @@ def get_violations_df(violations_file, spark):
     violations_df = violations_df.withColumnRenamed("Street Name","STREETNAME")
     violations_df = violations_df.withColumnRenamed("Issue Date","YEAR")
     
+    violations_df = violations_df.withColumn('HOUSENUM_RAW', col("HOUSENUM"))
+
     violations_df = violations_df.withColumn('COUNTY', get_county_code_udf(violations_df['COUNTY']))
     violations_df = violations_df.withColumn('HOUSENUM', get_street_number_udf(violations_df['HOUSENUM']))
     violations_df = violations_df.withColumn('STREETNAME', to_upper_udf(violations_df['STREETNAME']))
@@ -93,8 +98,6 @@ def get_violations_df(violations_file, spark):
     violations_df = violations_df.withColumn("HOUSENUM", violations_df["HOUSENUM"].cast("integer"))
     violations_df = violations_df.withColumn("YEAR", violations_df["YEAR"].cast("integer"))
 
-    
-    violations_df = violations_df.where(violations_df.YEAR.isin(list(range(2015,2020))))
     violations_df = violations_df.repartition(5,'COUNTY')
     violations_df = violations_df.alias('v')
     return violations_df
@@ -119,10 +122,10 @@ def get_streets_df(streets_file, spark):
     streets_df = streets_df.withColumn('BOROCODE', as_digit_udf(streets_df['BOROCODE']))
     streets_df = streets_df.withColumn('FULL_STREE', to_upper_udf(streets_df['FULL_STREE']))
     streets_df = streets_df.withColumn('ST_LABEL',   to_upper_udf(streets_df['ST_LABEL']))
-    streets_df = streets_df.withColumn('OddLo', get_street_number_udf(streets_df['OddLo']))
-    streets_df = streets_df.withColumn('OddHi', get_street_number_udf(streets_df['OddHi']))
-    streets_df = streets_df.withColumn('EvenLo', get_street_number_udf(streets_df['EvenLo']))
-    streets_df = streets_df.withColumn('EvenHi', get_street_number_udf(streets_df['EvenHi']))
+    streets_df = streets_df.withColumn('OddLo', get_street_number_udf(streets_df['OddLo'], lit(-1)))
+    streets_df = streets_df.withColumn('OddHi', get_street_number_udf(streets_df['OddHi'], lit(-1)))
+    streets_df = streets_df.withColumn('EvenLo', get_street_number_udf(streets_df['EvenLo'], lit(-1)))
+    streets_df = streets_df.withColumn('EvenHi', get_street_number_udf(streets_df['EvenHi'], lit(-1)))
     
     streets_df = streets_df.withColumn("BOROCODE", streets_df["BOROCODE"].cast("integer"))
     streets_df = streets_df.withColumn("OddLo", streets_df["OddLo"].cast("integer"))
@@ -165,22 +168,34 @@ def run_spark(output_path):
     streets_dict = streets_df.rdd.flatMap(mapper).reduceByKey(lambda x,y: x+y).collectAsMap()
     streets_dict_bc = sc.broadcast(streets_dict)
 
-    def get_val(borocode, street, housenum):
-        val = streets_dict_bc.value.get( (borocode, street) )
-        if val:
-            for item in val:
-                if housenum % 2 == 0:
-                    if item[0] >= housenum and housenum <= item[1]:
-                        return item[4]
-                else:
-                    if item[2] >= housenum and housenum <= item[3]:
-                        return item[4]     
+    def search_candidates(candidates, housenum):
+        for item in candidates:
+            if housenum % 2 == 0:
+                if item[0] <= housenum and housenum <= item[1]:
+                    return item[4]
+            else:
+                if item[2] <= housenum and housenum <= item[3]:
+                    return item[4]  
         return None
+        
+    def get_val(borocode, street, housenum, housenum_raw=None):
+        res = None
+        candidates = streets_dict_bc.value.get( (borocode, street) )
+        
+        if candidates:
+            res = search_candidates(candidates, housenum)
+            if res is None and housenum_raw and type(housenum_raw) == str and "-" in housenum_raw:
+                
+                elems = housenum_raw.split("-")
+                if len(elems) == 2 and elems[0].isdigit() and elems[1].isdigit():
+                    res = search_candidates(candidates, int(elems[1]))
+        return res
 
     get_val_udf = udf(get_val)
     matched_violations = violations_df.withColumn('PHYSICALID', get_val_udf(violations_df['v.COUNTY'], 
                                                                             violations_df['v.STREETNAME'], 
-                                                                            violations_df['v.HOUSENUM']
+                                                                            violations_df['v.HOUSENUM'],
+                                                                            violations_df['v.HOUSENUM_RAW']
                                                             ))
 
     matched_violations = matched_violations.filter( matched_violations['PHYSICALID'].isNotNull() )
