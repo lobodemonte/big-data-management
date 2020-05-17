@@ -10,10 +10,8 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, udf, array, count, split
 from pyspark.sql.functions import broadcast, coalesce, lit
 
-streets = "nyc_cscl.csv"
-violations = "nyc_parking_violation/*.csv"
-#streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
-#violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
+streets = "hdfs:///tmp/bdm/nyc_cscl.csv"
+violations = "hdfs:///tmp/bdm/nyc_parking_violation/*.csv"
 
 def to_upper(raw_str):
     import string
@@ -178,28 +176,19 @@ def process_num(str_num, default=None):
                 return (0,int(new_val))
     return (0,0)
 
-def mapper_2(row):
+def mapper(row):
     evenLo = process_num(row['EvenLo'])
     evenHi = process_num(row['EvenHi'])
     oddLo = process_num(row['OddLo'])
     oddHi = process_num(row['OddHi'])
     
     if row['FULL_STREE'] == row['ST_LABEL']:
-        yield ( 
-                (row['BOROCODE'], row["FULL_STREE"] ), 
-                [( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] )] 
-              ) 
+        yield ( (row['BOROCODE'], row["FULL_STREE"] ),[( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] )] ) 
     else:
-        yield ( 
-                (row['BOROCODE'], row["FULL_STREE"]), 
-                [( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] )] 
-              ) 
-        yield ( 
-                (row['BOROCODE'], row["ST_LABEL"]), 
-                [( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] ) ]
-              )  
+        yield ( (row['BOROCODE'], row["FULL_STREE"]), [( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] )] ) 
+        yield ( (row['BOROCODE'], row["ST_LABEL"]),   [( evenLo, evenHi, oddLo, oddHi, row['PHYSICALID'] )] )  
 
-def search_candidates_2(candidates, housenum):
+def search_candidates(candidates, housenum):
     for item in candidates:
         if housenum[1] % 2 == 0:
             if item[0] <= housenum and housenum <= item[1]:
@@ -216,22 +205,29 @@ def run_spark(output_file):
     violations_df = get_violations_df(violations, spark)
     streets_df = get_streets_df(streets, spark)
 
-    streets_dict = streets_df.rdd.flatMap(mapper_2).reduceByKey(lambda x,y: x+y).collectAsMap()
+    streets_dict = streets_df.rdd.flatMap(mapper).reduceByKey(lambda x,y: x+y).collectAsMap()
     streets_dict_bc = sc.broadcast(streets_dict)
 
-    def get_val_2(borocode, street, num0, num1):
+    def get_val(borocode, street, num0, num1):
         res = None
         housenum = (num0, num1)
         if num0 != 0 and num1 == 0:
             housenum = (num1, num0)
         candidates = streets_dict_bc.value.get( (borocode, street) )
-        
         if candidates:
-            res = search_candidates_2(candidates, housenum)
-
+            res = search_candidates(candidates, housenum)
+            if res is None and num0 > 1000 and num1 == 0:
+                housenum = (int(num0/100), num0%100)
+                res = search_candidates(candidates, housenum)
+            if res is None and num0 != 0 and num1 != 0:
+                housenum = (0, (num0*100)+num1) 
+                res = search_candidates(candidates, housenum)
+            if res is None and num0 != 0 and num1 != 0:
+                housenum = (0, num1)
+                res = search_candidates(candidates, housenum)        
         return res
 
-    get_val_udf = udf(get_val_2)
+    get_val_udf = udf(get_val)
     matched_violations = violations_df.withColumn('PHYSICALID', 
                                                 get_val_udf(violations_df['v.COUNTY'], violations_df['v.STREETNAME'], 
                                                                             violations_df['v.NUM0'], violations_df['v.NUM1']))
