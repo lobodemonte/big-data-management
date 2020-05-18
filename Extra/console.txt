@@ -1,0 +1,3 @@
+Output Path:  results
+Start Time:  2020-05-17 21:53:15.493646
+Done, Elapsed: 822.231284 (secs)
